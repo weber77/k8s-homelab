@@ -28,3 +28,29 @@ Features:
 
 ## Goal
 Make it fast and repeatable to spin up a multi-node virtual infrastructure on a single machine with minimal manual setup.
+
+## 🚀 How to Use
+
+This project provides two scripts:
+
+1. **KVM setup script** – installs and configures virtualization
+2. **VM creation script** – creates multiple Ubuntu cloud-init virtual machines
+
+---
+
+## 📦 Requirements
+
+- Ubuntu host (recommended)
+- Internet connection
+- sudo privileges
+- CPU virtualization enabled (Intel VT-x / AMD-V)
+
+---
+
+## 1️⃣ Install and Configure KVM
+
+Run the setup script to install and configure KVM, libvirt, and networking.
+
+```bash
+chmod +x kvm-setup.sh
+./kvm-setup.sh
