@@ -83,7 +83,7 @@ echo "Creating VM..."
 virt-install \
   --name "$VM_NAME" \
   --memory 2048 \
-  --vcpus 1 \
+  --vcpus 2 \
   --disk path="$VM_DISK",format=qcow2 \
   --disk path="$SEED_ISO",device=cdrom \
   --import \
