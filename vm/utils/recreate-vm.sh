@@ -55,16 +55,30 @@ cd "$CLOUD_DIR"
 # -------------------------------------------------
 # user-data
 # -------------------------------------------------
-cat <<EOF > user-data
+cat > "$WORKDIR/user-data" <<EOF
 #cloud-config
 hostname: $VM_NAME
+
 users:
   - name: ubuntu
     groups: sudo
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
+
 ssh_pwauth: true
+
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+  expire: false
+
+package_update: true
+
+packages:
+  - qemu-guest-agent
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
 EOF
 
 # -------------------------------------------------

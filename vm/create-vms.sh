@@ -130,9 +130,14 @@ users:
     groups: sudo
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
 
 ssh_pwauth: true
+
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+  expire: false
+
 package_update: true
 
 packages:
