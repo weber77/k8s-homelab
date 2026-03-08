@@ -107,6 +107,6 @@ echo "Step 5: Apply Flannel Network"
 kubectl apply -f https://github.com/coreos/flannel/raw/master/Documentation/kube-flannel.yml
 
 # Remove control-plane taint so pods can be scheduled
-kubectl taint nodes $(hostname -I | awk '{print $1}') node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint nodes $(hostname) node-role.kubernetes.io/control-plane:NoSchedule-
 
 echo "Kubernetes cluster setup is complete!"
