@@ -16,12 +16,12 @@ Options:
   -R, --resource <res>     Comma-separated resources (default: pods)
   -h, --help               Show help
 
-Outputs:
+Outputs (in <username>/):
   <username>.key
   <username>.csr
   <username>.crt
-  csr-<username>.yaml
-  rbac-<username>.yaml
+  csr.yaml
+  rbac.yaml
 EOF
 }
 
@@ -123,17 +123,20 @@ for bin in openssl kubectl base64 tr; do
   fi
 done
 
-KEY_FILE="${USERNAME}.key"
-CSR_FILE="${USERNAME}.csr"
-CRT_FILE="${USERNAME}.crt"
-CSR_YAML="csr-${USERNAME}.yaml"
-RBAC_YAML="rbac-${USERNAME}.yaml"
+OUT_DIR="${USERNAME}"
+KEY_FILE="${OUT_DIR}/${USERNAME}.key"
+CSR_FILE="${OUT_DIR}/${USERNAME}.csr"
+CRT_FILE="${OUT_DIR}/${USERNAME}.crt"
+CSR_YAML="${OUT_DIR}/csr.yaml"
+RBAC_YAML="${OUT_DIR}/rbac.yaml"
 
-if [[ -e "${KEY_FILE}" || -e "${CSR_FILE}" || -e "${CRT_FILE}" || -e "${CSR_YAML}" || -e "${RBAC_YAML}" ]]; then
-  echo "Error: one or more output files already exist for '${USERNAME}'." >&2
-  echo "Refusing to overwrite: ${KEY_FILE} ${CSR_FILE} ${CRT_FILE} ${CSR_YAML} ${RBAC_YAML}" >&2
+if [[ -d "${OUT_DIR}" ]]; then
+  echo "Error: output directory already exists: ${OUT_DIR}" >&2
+  echo "Refusing to overwrite. Remove or rename it first." >&2
   exit 1
 fi
+
+mkdir -p "${OUT_DIR}"
 
 openssl genrsa -out "${KEY_FILE}" 2048
 openssl req -new -key "${KEY_FILE}" -out "${CSR_FILE}" -subj "/CN=${USERNAME}/O=group1"
@@ -190,7 +193,7 @@ EOF
 
 kubectl apply -f "${RBAC_YAML}"
 
-echo "Created user cert and RBAC."
+echo "Created user cert and RBAC in ${OUT_DIR}/"
 echo "  key:  ${KEY_FILE}"
 echo "  csr:  ${CSR_FILE}"
 echo "  crt:  ${CRT_FILE}"
