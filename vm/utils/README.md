@@ -1,7 +1,19 @@
 # VM utils – what each file does
 
-These utilities help you manage VMs (recreate or purge). Run them on your **KVM host**.  
-For resetting Kubernetes on a node (inside a VM), see **k8s/utils/reset-k8s-node.sh**.
+These utilities help you manage VMs (recreate or purge). Run them on your **KVM host**.
+
+---
+
+## Utils structure in this repo
+
+| Location | Run on | Purpose |
+|----------|--------|---------|
+| **vm/utils/** | Host | VM lifecycle: recreate one VM from cloud image, or purge one VM and its disks. |
+| **k8s/utils/** | Workstation / host | Kubernetes helpers: reset a node (run inside a VM), create/update users (run from workstation). |
+| **k8s/utils/user/** | Workstation | User management: create user (cert + RBAC), add/remove RBAC for a user. See **k8s/utils/user/README.md**. |
+
+- **Resetting a Kubernetes node** (inside a VM): **k8s/utils/reset-k8s-node.sh**.
+- **Creating or updating cluster users** (from workstation): **k8s/utils/user/new-user.sh**, **k8s/utils/user/update-user-rbac.sh** — see **k8s/utils/user/README.md**.
 
 ---
 
@@ -57,4 +69,5 @@ Example: `./purge-vm.sh k8s-d`
 | recreate-vm.sh   | Host    | Rebuild one VM from cloud image  | Yes      | For image dir only    |
 | purge-vm.sh      | Host    | Remove one VM and its disks      | Yes      | For image dir only    |
 
-**Kubernetes node reset** (run inside a VM): **k8s/utils/reset-k8s-node.sh** — see that file or run `chmod +x reset-k8s-node.sh && ./reset-k8s-node.sh` inside the VM.
+**Kubernetes node reset** (run inside a VM): **k8s/utils/reset-k8s-node.sh**.  
+**User management** (create/update users from workstation): **k8s/utils/user/README.md**.

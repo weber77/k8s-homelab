@@ -1,0 +1,65 @@
+# Container Storage Interface (CSI)
+
+## What is CSI?
+
+The Container Storage Interface (CSI) is a standard that lets Kubernetes use external storage systems (block devices, file systems, object storage) without baking drivers into the core Kubernetes code. Storage vendors implement a CSI driver; Kubernetes talks to it over gRPC to provision, attach, mount, and delete volumes.
+
+## Why it matters
+
+- Pods often need persistent data (databases, config, logs).
+- Without CSI: storage logic was in-tree and tied to Kubernetes releases.
+- With CSI: drivers are out-of-tree, so you can add or update storage backends without changing Kubernetes.
+
+## Main concepts
+
+- **CSI driver**: A sidecar (or DaemonSet) that runs in the cluster and implements the CSI gRPC API (CreateVolume, DeleteVolume, ControllerPublishVolume, NodeStageVolume, NodePublishVolume, etc.).
+- **Volume lifecycle**: Provision → Attach (optional for some drivers) → Mount. The control plane (provisioner, attacher) and the node (node plugin) work together.
+- **StorageClass**: Defines a "class" of storage (e.g. SSD, replicated). It often points to a CSI driver via `provisioner: <driver-name>`.
+- **PersistentVolume (PV) / PersistentVolumeClaim (PVC)**: User asks for storage with a PVC; the CSI provisioner creates a PV and binds it to the PVC.
+
+## Steps to use CSI storage (high level)
+
+1. **Install the CSI driver**  
+   Deploy the driver’s manifests (e.g. DaemonSet for node plugin, Deployment for controller). The exact steps depend on the driver (e.g. hostpath-csi, ceph-csi, ebs-csi).
+
+2. **Create a StorageClass** (if the driver supports dynamic provisioning)  
+   - Set `provisioner` to the driver name (e.g. `driver-name.csi.vendor.io`).  
+   - Add any driver-specific parameters.
+
+3. **Create a PVC**  
+   - Reference the StorageClass in `spec.storageClassName`.  
+   - Set `spec.resources.requests.storage` and optionally `spec.accessModes`.
+
+4. **Use the volume in a Pod**  
+   - In `spec.volumes`, add a `persistentVolumeClaim` volume with `claimName: <pvc-name>`.  
+   - Mount that volume in `spec.containers[].volumeMounts`.
+
+5. **Verify**  
+   - `kubectl get pv,pvc` — PVC should be Bound, PV should exist.  
+   - `kubectl describe pvc <name>` — check events and volume name.  
+   - `kubectl get pods -o wide` and on the node: `lsblk` / `mount` to see the device and mount.
+
+## Useful commands
+
+- List StorageClasses:  
+  `kubectl get storageclass`
+
+- List PVs and PVCs:  
+  `kubectl get pv`  
+  `kubectl get pvc -A`
+
+- Inspect PVC (events, volume name):  
+  `kubectl describe pvc <pvc-name> -n <namespace>`
+
+- Check if CSI driver pods are running:  
+  `kubectl get pods -n kube-system | grep csi`
+
+- On a node where the volume is mounted:  
+  `lsblk`  
+  `mount | grep <volume-path>`
+
+## Troubleshooting
+
+- PVC stuck "Pending": check StorageClass, provisioner name, and CSI controller logs.  
+- Mount errors: check node plugin (DaemonSet) logs and that the node has the required kernel modules or tools (e.g. for NFS, iSCSI).  
+- Detach/attach issues: check controller logs and cloud/storage provider permissions (e.g. IAM for EBS CSI).

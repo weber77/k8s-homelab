@@ -1,0 +1,77 @@
+# Container Network Interface (CNI)
+
+## What is CNI?
+
+The Container Network Interface (CNI) is a standard that defines how the Kubernetes runtime (e.g. kubelet) configures networking for a pod. When a pod is created, the runtime calls a CNI plugin (or a chain of plugins) with commands like ADD/DEL to attach the pod to the cluster network and get an IP.
+
+## Why it matters
+
+- Every pod needs an IP and the ability to talk to other pods and to the outside world.
+- CNI decouples "how to wire the pod" from Kubernetes core. You choose a plugin (Calico, Cilium, Flannel, Weave, etc.) and configure it; kubelet uses it for each pod.
+
+## Main concepts
+
+- **CNI plugin**: A binary or script that implements the CNI spec (e.g. ADD container to network, DEL container from network). It is invoked by the container runtime (containerd, CRI-O) when the runtime creates or tears down the pod’s network namespace.
+- **Pod network namespace**: Each pod has its own network namespace. The CNI plugin creates a veth pair: one end in the host, one in the pod namespace, and configures IP, routes, and sometimes firewall rules.
+- **Plugin chain**: You can chain plugins (e.g. main plugin for IPAM + bridge, then a meta plugin like flannel or a policy plugin).
+
+## Where CNI is configured
+
+- Config: typically `/etc/cni/net.d/` (e.g. `10-calico.conflist`).
+- Binaries: typically `/opt/cni/bin/`.
+- kubelet passes the network namespace path and container ID to the plugin when it runs ADD/DEL.
+
+## Steps to inspect pod networking
+
+Do these from a node that runs the pod (or from the control plane if you use kubectl from there).
+
+1. **List nodes and get pod placement**  
+   - `kubectl get nodes -o wide`  
+   - `kubectl get pods -o wide`  
+   Note which node the pod is on.
+
+2. **On that node: list veth interfaces**  
+   - `ip link show | grep -A 1 "veth"`  
+   You should see veth pairs; one end is in the host, the other in the pod’s network namespace.
+
+3. **List network namespaces**  
+   - `ip netns list`  
+   Or: `ls /var/run/netns`  
+   Pod namespaces are often named like `cni-<id>` or similar (depends on runtime/CNI).
+
+4. **Inspect the pod’s network namespace**  
+   - Find the namespace for your pod (from step 3 or from the CNI/containerd metadata).  
+   - `ip netns exec <pod-namespace> ip addr show`  
+   - `ip netns exec <pod-namespace> ip route show`  
+   This shows the IP and routes inside the pod.
+
+5. **Inspect from inside the pod**  
+   - `kubectl exec -it <pod-name> -- sh`  
+   - Inside: `ip addr` (or `ip a`), `ip route`, `cat /etc/resolv.conf`  
+   This should match what you saw in the pod’s network namespace on the host.
+
+6. **Check CNI config and binaries**  
+   - `ls /etc/cni/net.d/`  
+   - `ls /opt/cni/bin/`  
+   - `cat /etc/cni/net.d/<config>`  
+   Confirm the plugin and IPAM settings.
+
+## Useful commands (summary)
+
+From control plane / any machine with kubectl:
+- `kubectl get nodes -o wide`
+- `kubectl get pods -o wide`
+- `kubectl exec -it <pod-name> -- ip a`
+- `kubectl exec -it <pod-name> -- ip route`
+
+On the node (where the pod runs):
+- `ip link show | grep -A 1 "veth"`
+- `ip netns list`
+- `ip netns exec <pod-namespace> ip addr show`
+- `ls /etc/cni/net.d/` and `cat /etc/cni/net.d/<file>`
+
+## Troubleshooting
+
+- Pod has no IP / "NetworkPlugin not ready": check that the CNI binary exists, config is valid, and the CNI plugin pods (if any, e.g. Calico node) are running. Check kubelet logs.
+- Can’t see pod namespace with `ip netns list`: some runtimes (e.g. containerd) require creating a symlink from `/var/run/netns/<name>` to the namespace handle; check the runtime’s CNI docs.
+- Pod can’t reach other pods or services: verify routes and IPAM (address allocation), and that any overlay or firewall plugin (e.g. Calico, Cilium) is healthy.
