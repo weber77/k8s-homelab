@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-pod
+  labels:
+    purpose: demostrate-args
+spec:
+  containers:
+    - name: example-container
+      image: ubuntu
+      command: ["/bin/echo", "Hello"]
+      args: ["Welcome", "to", "Kubernetes"]

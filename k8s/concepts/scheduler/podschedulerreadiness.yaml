@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-pod
+spec:
+  #schedulingGates:
+  #-  name: demo-gate
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.6
