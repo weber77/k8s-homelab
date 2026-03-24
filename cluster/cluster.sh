@@ -8,6 +8,7 @@ print_manual() {
   echo "  ./cluster.sh --workers 2 --worker-only"
   echo "  ./cluster.sh --prepare-image"
   echo "  ./cluster.sh --base-image <path>"
+  echo "  sudo ./purge-cluster.sh   # tear down VMs (see purge-cluster.sh --help)"
 }
 
 ensure_sshpass() {
