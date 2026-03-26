@@ -17,3 +17,12 @@ for vm in $(virsh list --all --name); do
   fi
 done
 ```
+
+## reset vm
+
+```bash
+sudo kubeadm reset -f
+sudo rm -rf /etc/kubernetes /var/lib/etcd /var/lib/kubelet /etc/cni/net.d /var/lib/cni "$HOME/.kube"
+sudo systemctl restart containerd
+sudo systemctl restart kubelet
+```

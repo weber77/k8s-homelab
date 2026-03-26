@@ -1,71 +1,123 @@
-## High Availability — Stacked Control Plane (kube-vip)
+## High Availability Using a Stacked Control Plane (this repo’s lab)
 
-A runbook for **this repo** (`Self-Hosted-Kubernetes-/`) to build a
-**stacked-etcd HA control plane** with kubeadm on libvirt/KVM VMs.
+This guide is a **runbook for this repo** (`Self-Hosted-Kubernetes-`) to build a **stacked-etcd HA control plane** with kubeadm on libvirt/KVM VMs.
 
-Every control-plane node runs `kube-apiserver`, `controller-manager`,
-`scheduler`, **and** a local `etcd` member.
-A floating VIP managed by **kube-vip** gives clients a single stable
-`<VIP>:6443` endpoint — when the node holding the VIP goes down, another
-control plane takes it over automatically.
+### What “HA” means here (and what it doesn’t)
 
-> **Not ready for full HA?**
-> `cluster/cluster.sh --control-planes 3 --workers 2` creates a
-> multi-control-plane cluster in one shot, but its API endpoint is pinned
-> to the first CP (no VIP, no failover). This guide adds the VIP layer.
+- **Stacked control plane**: each control-plane node runs `kube-apiserver`, `controller-manager`, `scheduler`, **and** a local `etcd` member.
+- **HA requirement**: clients must talk to a **stable API endpoint** (load balancer or virtual IP). Without that, a multi-control-plane cluster is _not_ truly highly available for API access.
 
----
+Important: the repo’s current automation script (`cluster/cluster.sh`) creates multiple control planes, but **does not configure** `--control-plane-endpoint`. That means:
 
-## Prerequisites
+- If the “primary” control plane goes down, **your `kubectl` endpoint likely breaks** unless you manually switch to another control-plane IP.
+- The cluster may still function internally, but you don’t have HA access to the API.
 
-| Requirement     | Detail                                                                                                                         |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Host**        | Linux with KVM/libvirt (`virsh`, `virt-install`)                                                                               |
-| **Base image**  | Built by `cluster/prepare-image.sh` → `/var/lib/libvirt/images/k8s-base.qcow2` (containerd, kubeadm, kubelet, kubectl v1.33.0) |
-| **VMs**         | 3 control planes (odd for etcd quorum) + any number of workers                                                                 |
-| **Credentials** | `ubuntu` / `ubuntu` (default from this repo)                                                                                   |
-| **Network**     | All VMs on the same L2 segment (libvirt `default` NAT `192.168.122.0/24`)                                                      |
+This guide gives you two paths:
 
-Ports required between nodes:
-
-- `6443/tcp` — Kubernetes API
-- `2379-2380/tcp` — etcd
-- `10250/tcp` — kubelet
-- CNI traffic (Calico VXLAN/IPIP)
+- **Path A (quick)**: use the existing scripts to create a _multi-control-plane_ cluster (**not full HA**).
+- **Path B (recommended)**: implement a real HA API endpoint using a **VIP via kube-vip** (no external LB VM required) or an **HAProxy VM** (simple TCP forwarder).
 
 ---
 
-## Variables — decide before you start
+## Prerequisites (your repo + lab)
 
-```
-CP_COUNT=3
-W_COUNT=2
-VIP=192.168.122.50       # must be unused in the subnet
-POD_CIDR=10.244.0.0/16   # must NOT overlap the VM subnet
-```
+- **A Linux host with KVM/libvirt** (the `vm/` and `cluster/` scripts assume `virsh`, libvirt networking, etc.).
+- **A Kubernetes-ready VM base image**: this repo expects VMs to be cloned from `/var/lib/libvirt/images/k8s-base.qcow2`, which includes `containerd`, `kubeadm`, `kubelet`, and `kubectl` (v1.33.0 in current scripts).
+- **VMs**: for HA, use **3 control planes** (odd number for etcd quorum) and any number of workers.
+- **Credentials** (default from this repo’s VM provisioning): user `ubuntu`, password `ubuntu`.
+- **Network**: all VMs on the same L2 segment (libvirt `default` NAT network is fine for the lab).
+- **Ports** between nodes (within the libvirt network):
+  - `6443/tcp` Kubernetes API
+  - `2379-2380/tcp` etcd peer/client
+  - `10250/tcp` kubelet API
+  - plus CNI-specific traffic (Flannel VXLAN by default in this repo’s current flow)
+
+Repo references:
+
+- `cluster/cluster.sh`: creates VMs, runs `kubeadm init`, installs Flannel, joins control planes + workers.
+- `cluster/purge-cluster.sh`: tear down VMs / clean lab.
+- `cluster/join-workers.sh`: reset + join workers (useful for recovery).
+- `cluster/prepare-image.sh`: builds `/var/lib/libvirt/images/k8s-base.qcow2` (Kubernetes-ready golden image).
 
 ---
 
-## Step 0 — Prepare the base image
+## Variables to decide up front
 
-On the KVM host, from `Self-Hosted-Kubernetes-/cluster/`:
+Pick these before you start (examples assume libvirt `default` network `192.168.122.0/24`):
+
+- `CP_COUNT=3`
+- `W_COUNT=2` (or whatever you want)
+- **API endpoint strategy** (choose one):
+  - **VIP (recommended)**: `API_VIP=192.168.122.50` (must be unused)
+  - **LB VM**: `LB_IP=192.168.122.60` and it forwards to all CPs
+- **Kubernetes version**: this repo’s `cluster/cluster.sh` currently pins `--kubernetes-version=v1.33.0`
+- **Pod CIDR**: pick a Pod CIDR that does **not** overlap your VM subnet (libvirt is often `192.168.122.0/24`). Example: `10.244.0.0/16`.
+
+---
+
+## Path A: Use current automation (multi-control-plane, not full HA)
+
+Use this if you mainly want “multiple control planes” quickly, and you accept that your API endpoint is tied to the first control plane.
+
+From `Self-Hosted-Kubernetes-/cluster/` on the libvirt host:
 
 ```bash
-chmod +x prepare-image.sh create-vms.sh
-./prepare-image.sh
+chmod +x cluster.sh create-vms.sh prepare-image.sh purge-cluster.sh join-workers.sh
+./cluster.sh --control-planes 3 --workers 2
 ```
 
-This builds `/var/lib/libvirt/images/k8s-base.qcow2`.
-Every VM cloned afterward inherits the Kubernetes tooling.
+What happens (high level):
+
+- VMs are created as `k8s-cp-a`, `k8s-cp-b`, `k8s-cp-c`, `k8s-w-a`, `k8s-w-b`
+- The script runs `kubeadm init` on the first CP, applies Flannel, then joins other CPs and workers
+
+Verify (from the first control plane VM):
+
+```bash
+kubectl get nodes -o wide
+kubectl get pods -n kube-system
+```
+
+Limitation: if `k8s-cp-a` is down, the API endpoint you used to talk to the cluster is down too (unless you switch to another CP IP manually).
 
 ---
 
-## Step 1 — Create the VMs
+## Path B (recommended): true stacked-CP HA with a stable API endpoint
 
-Create VMs only — do **not** run `cluster.sh` (we need manual control over
-`kubeadm init` to set `--control-plane-endpoint`):
+You have two good options for a lab:
+
+- **Option B1: kube-vip (VIP)**: no extra VM, clients use `API_VIP:6443`
+- **Option B2: HAProxy VM**: one extra “lb” VM that forwards `:6443` to all CPs
+
+### Option B1: kube-vip VIP (no load balancer VM)
+
+This is typically the cleanest “homelab HA” approach.
+
+#### Step 0: Ensure your VMs will have kubeadm/kubectl (prepare the base image)
+
+On the KVM/libvirt host, from `Self-Hosted-Kubernetes-/cluster/`:
 
 ```bash
+cd Self-Hosted-Kubernetes-/cluster
+chmod +x cluster.sh prepare-image.sh create-vms.sh worker-node.sh
+./cluster.sh --prepare-image
+```
+
+This creates/updates the golden image at:
+
+- `/var/lib/libvirt/images/k8s-base.qcow2`
+
+All VMs created afterward via `cluster/create-vms.sh` will inherit the Kubernetes tooling from that image.
+
+#### Step 1: Create the VMs (control planes + workers)
+
+You can still use the repo to create VMs. If you run `cluster/cluster.sh` it will also initialize Kubernetes, which we _don’t_ want yet for HA (because we need `--control-plane-endpoint`).
+
+So create VMs only using `cluster/create-vms.sh` (it’s a VM provisioner, not a kubeadm runner):
+
+```bash
+cd Self-Hosted-Kubernetes-/cluster
+chmod +x create-vms.sh
 ./create-vms.sh --prefix k8s --role cp 3
 ./create-vms.sh --prefix k8s --role w  2
 ```
@@ -76,88 +128,49 @@ Get the IPs:
 virsh net-dhcp-leases default
 ```
 
-Record `CP1_IP`, `CP2_IP`, `CP3_IP`, and the worker IPs.
-Confirm that `192.168.122.50` (our VIP) is **not** assigned to any VM.
+Write down:
 
----
+- `CP1_IP`, `CP2_IP`, `CP3_IP`
+- `WORKER_IPS...`
+- Choose an unused `API_VIP` in the same subnet (example: `192.168.122.50`)
 
-## Step 2 — Bootstrap the first control plane
+#### Step 2: Install kube-vip as a static Pod (so the VIP exists before kubeadm checks it)
 
-SSH into `k8s-cp-a`.
+On the first control plane, create a kube-vip manifest that:
 
-### 2a — Detect the network interface
+- advertises `API_VIP` on the control-plane nodes
+- listens on `:6443`
+
+For this lab, the common approach is to deploy kube-vip as a static Pod in `/etc/kubernetes/manifests/` so it comes up early and is managed by kubelet.
+
+Bootstrap gotcha (important):
+
+- On a brand-new node, **kubelet often won’t start successfully until after `kubeadm init` writes its config**.
+- That means a kube-vip **static Pod may not actually start early enough** to satisfy kubeadm’s first health checks against the VIP.
+
+The reliable lab bootstrap is:
+
+- **Temporarily add the VIP to the first control plane interface** (so the VIP is reachable immediately)
+- Run `kubeadm init --control-plane-endpoint VIP:6443`
+- Then deploy kube-vip so it can “own” the VIP long-term (and later move it during failover)
+
+Run (adjust interface name if needed; on Ubuntu/libvirt it’s often `ens3`):
 
 ```bash
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(ens|enp|eth)' | head -n1)
-echo "Interface: $IFACE"
+ip -o link show | awk -F': ' '{print $2}' | grep -E '^(ens|enp|eth)' | head -n1
 ```
 
-### 2b — Temporarily bind the VIP
-
-kube-vip starts **after** `kubeadm init` (it needs `/etc/kubernetes/admin.conf`).
-To let `kubeadm init` reach the VIP endpoint during its own health checks, we
-temporarily add it to this node's interface:
+Assume it prints `ens3`. Then:
 
 ```bash
 export VIP=192.168.122.50
+export IFACE=ens3
 
 sudo ip addr add "${VIP}/32" dev "${IFACE}" || true
-ip addr show "${IFACE}" | grep -F "${VIP}"
-```
+sudo arping -I "${IFACE}" -c 3 "${VIP}" || true
 
-### 2c — kubeadm init
+sudo mkdir -p /etc/kubernetes/manifests
 
-```bash
-sudo kubeadm init \
-  --control-plane-endpoint "${VIP}:6443" \
-  --upload-certs \
-  --pod-network-cidr=10.244.0.0/16 \
-  --kubernetes-version=v1.33.0 \
-  --cri-socket unix:///run/containerd/containerd.sock
-```
-
-Set up kubectl:
-
-```bash
-mkdir -p "$HOME/.kube"
-sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
-sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
-```
-
-**Save the output** — you'll need the `kubeadm join` command and `--certificate-key` later.
-
-> **If init fails** with `context deadline exceeded` on the VIP, the VIP
-> wasn't reachable. Reset and retry:
->
-> ```bash
-> sudo kubeadm reset -f
-> sudo rm -rf /etc/kubernetes /var/lib/etcd /var/lib/kubelet /etc/cni/net.d "$HOME/.kube"
-> sudo systemctl restart containerd
-> ```
->
-> Re-add the VIP (step 2b) and run init again.
-
-### 2d — Create a localhost kubeconfig for kube-vip
-
-kube-vip needs a kubeconfig to do leader election via the Kubernetes API.
-Two things must be right:
-
-1. **Point to `127.0.0.1:6443`** (the local apiserver), not the VIP.
-   Otherwise kube-vip can't reach the API when the VIP is down — deadlock.
-2. **Use `super-admin.conf`** as the base on CP1.
-   Starting with K8s 1.29, `admin.conf` credentials depend on RBAC bindings
-   that may not be fully ready when kube-vip first starts.
-   `super-admin.conf` uses the `system:masters` group which always has access.
-
-```bash
-sudo cp /etc/kubernetes/super-admin.conf /etc/kubernetes/kube-vip.conf
-sudo sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|' /etc/kubernetes/kube-vip.conf
-sudo chmod 600 /etc/kubernetes/kube-vip.conf
-```
-
-### 2e — Deploy kube-vip as a static pod
-
-```bash
 sudo tee /etc/kubernetes/manifests/kube-vip.yaml >/dev/null <<EOF
 apiVersion: v1
 kind: Pod
@@ -166,121 +179,145 @@ metadata:
   namespace: kube-system
 spec:
   hostNetwork: true
+  # Pin the static Pod to this node (useful clarity for static Pods).
+  nodeName: $(hostname)
   containers:
     - name: kube-vip
       image: ghcr.io/kube-vip/kube-vip:latest
-      imagePullPolicy: Always
       args:
         - manager
       env:
+        # Static Pods do NOT get a ServiceAccount token by default.
+        # Without a kubeconfig, kube-vip will crash with:
+        #   open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory
         - name: KUBECONFIG
-          value: /etc/kubernetes/kube-vip.conf
-        - name: address
-          value: "${VIP}"
-        - name: port
-          value: "6443"
+          value: /etc/kubernetes/admin.conf
         - name: vip_arp
           value: "true"
         - name: vip_interface
           value: "${IFACE}"
-        - name: vip_subnet
+        - name: vip_cidr
           value: "32"
+        - name: vip_address
+          value: "${VIP}"
+        - name: port
+          value: "6443"
         - name: cp_enable
           value: "true"
         - name: cp_namespace
-          value: kube-system
-        - name: svc_enable
-          value: "false"
-        - name: vip_ddns
-          value: "false"
+          value: "kube-system"
         - name: vip_leaderelection
           value: "true"
-        - name: vip_leaseduration
-          value: "5"
-        - name: vip_renewdeadline
-          value: "3"
-        - name: vip_retryperiod
-          value: "1"
       securityContext:
         capabilities:
-          add: ["NET_ADMIN", "NET_RAW", "SYS_TIME"]
+          add: ["NET_ADMIN","NET_RAW"]
       volumeMounts:
-        - name: kubeconfig
-          mountPath: /etc/kubernetes/kube-vip.conf
+        - name: k8s-admin-conf
+          mountPath: /etc/kubernetes/admin.conf
           readOnly: true
   volumes:
-    - name: kubeconfig
+    - name: k8s-admin-conf
       hostPath:
-        path: /etc/kubernetes/kube-vip.conf
+        path: /etc/kubernetes/admin.conf
         type: File
 EOF
 ```
 
-Wait ~30 seconds for kubelet to start the static pod, then verify kube-vip
-owns the VIP. It should say `Running`, **not** `Completed`:
+Note: you do not need to pre-pull the image; kubelet will pull it when it starts the static Pod.
+
+Validate the VIP comes up:
 
 ```bash
-kubectl -n kube-system get pods | grep kube-vip
-ip addr show "${IFACE}" | grep -F "${VIP}"
+ip addr show "$IFACE" | grep -F "$VIP" || true
 ```
 
-### 2f — Remove the temporary VIP
+If `kube-vip` is `CrashLoopBackOff`, check logs:
 
-kube-vip now manages the VIP. Remove the manual assignment:
+```bash
+kubectl -n kube-system logs kube-vip-$(hostname) --previous || true
+```
+
+Once kube-vip is running and you can see the VIP on the interface, you may remove the temporary VIP assignment (optional):
 
 ```bash
 sudo ip addr del "${VIP}/32" dev "${IFACE}" || true
 ```
 
-Confirm kube-vip re-advertises it (the VIP should still appear):
+If the VIP does not appear, the most common issues are:
+
+- wrong interface name
+- `API_VIP` already in use
+- L2/ARP behavior blocked (rare in a simple libvirt network)
+
+#### Step 3: Bootstrap the first control plane using the VIP endpoint
+
+SSH/console into the first control plane and run:
 
 ```bash
-ip addr show "${IFACE}" | grep -F "${VIP}"
+sudo systemctl restart containerd
+sudo systemctl restart kubelet
+
+sudo kubeadm init \
+  --control-plane-endpoint "192.168.122.50:6443" \
+  --upload-certs \
+  --pod-network-cidr=10.244.0.0/16 \
+  --cri-socket unix:///run/containerd/containerd.sock
+
+mkdir -p "$HOME/.kube"
+sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
+sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
 ```
 
-### 2g — Install the CNI (Calico)
+If you already tried `kubeadm init` and got an error like “`Get https://<VIP>:6443/livez: context deadline exceeded`”, it usually means the VIP wasn’t up yet. Recovery on that node:
+
+```bash
+sudo kubeadm reset -f
+sudo rm -rf /etc/kubernetes /var/lib/etcd /var/lib/kubelet /etc/cni/net.d /var/lib/cni "$HOME/.kube"
+sudo systemctl restart containerd
+sudo systemctl restart kubelet
+```
+
+Then ensure kube-vip is running and the VIP is present on the interface, and rerun `kubeadm init`.
+
+```bash
+kubectl -n kube-system get pods -o wide | grep kube-vip || true
+```
+
+Install Calico (configured to match the Pod CIDR you used in `kubeadm init`):
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
-sed -i 's#value: "192\\.168\\.0\\.0/16"#value: "10.244.0.0/16"#' calico.yaml
+
+# IMPORTANT: make Calico's IP pool match kubeadm's --pod-network-cidr.
+# This guide uses 10.244.0.0/16, so replace the default 192.168.0.0/16.
+sudo sed -i 's#value: "192\\.168\\.0\\.0/16"#value: "10.244.0.0/16"#' calico.yaml
+
 kubectl apply -f calico.yaml
 ```
 
-Optional — allow workloads on control planes in the lab:
+Optional (if you want to schedule workloads on control planes in the lab):
 
 ```bash
 kubectl taint nodes "$(hostname)" node-role.kubernetes.io/control-plane:NoSchedule-
 ```
 
----
+#### Step 4: Join the remaining control planes
 
-## Step 3 — Join the remaining control planes
-
-### 3a — Get join credentials (on CP1)
+Back on CP1, generate the join commands:
 
 ```bash
-JOIN_CMD=$(sudo kubeadm token create --print-join-command)
-CERT_KEY=$(sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1)
-echo "${JOIN_CMD} --control-plane --certificate-key ${CERT_KEY}"
+sudo kubeadm token create --print-join-command
+sudo kubeadm init phase upload-certs --upload-certs
 ```
 
-Copy the full command printed above.
+You’ll use:
 
-### 3b — On each additional CP (CP2, then CP3)
+- the `kubeadm join ... --discovery-token-ca-cert-hash ...` command
+- plus `--control-plane --certificate-key <KEY>`
 
-SSH in and run the steps below **in this order**.
+On CP2 and CP3:
 
-**1) Join the cluster:**
-
-```bash
-sudo kubeadm join 192.168.122.50:6443 \
-  --token <token> \
-  --discovery-token-ca-cert-hash sha256:<hash> \
-  --control-plane \
-  --certificate-key <cert-key>
-```
-
-**2) Set up kubectl:**
+- configure kubectl:
 
 ```bash
 mkdir -p "$HOME/.kube"
@@ -289,18 +326,44 @@ sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
 kubectl get nodes
 ```
 
-**3) Create the localhost kubeconfig and deploy kube-vip:**
-
-On joined CPs, `admin.conf` is fine (RBAC bindings exist by now).
-`super-admin.conf` is only generated on the first CP.
+- join control-plane
 
 ```bash
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(ens|enp|eth)' | head -n1)
-export VIP=192.168.122.50
+sudo kubeadm join 192.168.122.50:6443 --token <token> \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --control-plane \
+  --certificate-key <cert-key>
+```
 
-sudo cp /etc/kubernetes/admin.conf /etc/kubernetes/kube-vip.conf
-sudo sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|' /etc/kubernetes/kube-vip.conf
-sudo chmod 600 /etc/kubernetes/kube-vip.conf
+#### Step 4.1: Install kube-vip on _every_ control-plane node (required for VIP failover)
+
+For VIP failover to work, `kube-vip` must be running on **all** control-plane nodes (`k8s-cp-a`, `k8s-cp-b`, `k8s-cp-c`) with the **same** `vip_address` and the correct `vip_interface` for each node.
+
+1. Ensure each control plane has an admin kubeconfig at `/etc/kubernetes/admin.conf`.
+
+- On `k8s-cp-a` it exists after init.
+- On joined control planes it may not be present by default; copy it from `k8s-cp-a`:
+
+```bash
+# Run this on k8s-cp-b and k8s-cp-c (adjust CP1_IP as needed)
+export CP1_IP=<k8s-cp-a-ip>
+sudo apt-get update -y && sudo apt-get install -y sshpass
+
+# /etc/kubernetes/admin.conf is root-readable on the remote node, so plain scp will fail.
+# Use SSH to read it with sudo, and write it locally as root.
+sudo mkdir -p /etc/kubernetes
+sshpass -p ubuntu ssh -o StrictHostKeyChecking=no ubuntu@${CP1_IP} "sudo cat /etc/kubernetes/admin.conf" \
+  | sudo tee /etc/kubernetes/admin.conf >/dev/null
+sudo chmod 600 /etc/kubernetes/admin.conf
+```
+
+2. Create/update the kube-vip static Pod manifest on **each** control plane (set `IFACE` correctly, e.g. `enp1s0`):
+
+```bash
+export VIP=192.168.122.50
+export IFACE=enp1s0
+
+sudo mkdir -p /etc/kubernetes/manifests
 
 sudo tee /etc/kubernetes/manifests/kube-vip.yaml >/dev/null <<EOF
 apiVersion: v1
@@ -313,87 +376,72 @@ spec:
   containers:
     - name: kube-vip
       image: ghcr.io/kube-vip/kube-vip:latest
-      imagePullPolicy: Always
       args:
         - manager
       env:
         - name: KUBECONFIG
-          value: /etc/kubernetes/kube-vip.conf
-        - name: address
-          value: "${VIP}"
-        - name: port
-          value: "6443"
+          value: /etc/kubernetes/admin.conf
         - name: vip_arp
+          value: "true"
+        - name: vip_leaderelection
           value: "true"
         - name: vip_interface
           value: "${IFACE}"
-        - name: vip_subnet
+        - name: vip_cidr
           value: "32"
+        - name: vip_address
+          value: "${VIP}"
+        - name: port
+          value: "6443"
         - name: cp_enable
           value: "true"
         - name: cp_namespace
-          value: kube-system
-        - name: svc_enable
-          value: "false"
-        - name: vip_ddns
-          value: "false"
-        - name: vip_leaderelection
-          value: "true"
-        - name: vip_leaseduration
-          value: "5"
-        - name: vip_renewdeadline
-          value: "3"
-        - name: vip_retryperiod
-          value: "1"
+          value: "kube-system"
       securityContext:
         capabilities:
-          add: ["NET_ADMIN", "NET_RAW", "SYS_TIME"]
+          add: ["NET_ADMIN","NET_RAW"]
       volumeMounts:
-        - name: kubeconfig
-          mountPath: /etc/kubernetes/kube-vip.conf
+        - name: k8s-admin-conf
+          mountPath: /etc/kubernetes/admin.conf
           readOnly: true
   volumes:
-    - name: kubeconfig
+    - name: k8s-admin-conf
       hostPath:
-        path: /etc/kubernetes/kube-vip.conf
+        path: /etc/kubernetes/admin.conf
         type: File
 EOF
 ```
 
-**4) Verify kube-vip is running:**
+3. Verify kube-vip health on each control plane:
 
 ```bash
-kubectl -n kube-system get pods -o wide | grep kube-vip
+sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-system get pod -o wide | grep kube-vip || true
+sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-system logs kube-vip-$(hostname) --previous || true
 ```
 
-You should see one `kube-vip` pod per control-plane node, all `Running`.
+#### Step 5: Join workers
 
----
-
-## Step 4 — Join workers
-
-On each worker node:
+On each worker:
 
 ```bash
-sudo kubeadm join 192.168.122.50:6443 \
-  --token <token> \
+sudo kubeadm join 192.168.122.50:6443 --token <token> \
   --discovery-token-ca-cert-hash sha256:<hash>
 ```
 
----
+#### Step 6: Verify HA behavior
 
-## Step 5 — Verify HA
-
-### Cluster health (from any CP)
+On any control plane (with kubeconfig):
 
 ```bash
 kubectl get nodes -o wide
-kubectl -n kube-system get pods -o wide | grep -E 'kube-vip|etcd|apiserver'
+kubectl get pods -n kube-system
+kubectl -n kube-system get endpoints kubernetes -o wide
 ```
 
-### Find which node holds the VIP
+If `kubectl` fails on `k8s-cp-b` / `k8s-cp-c` with `localhost:8080 was refused`, that node is missing a kubeconfig.
+Quick fixes:
 
-From the KVM host:
+- Use the admin kubeconfig directly:
 
 ```bash
 for vm in k8s-cp-a k8s-cp-b k8s-cp-c; do
@@ -404,95 +452,54 @@ for vm in k8s-cp-a k8s-cp-b k8s-cp-c; do
 done
 ```
 
-### Test failover
+Then test failover:
 
-1. Power off the node that holds the VIP (e.g. CP1):
-
-```bash
-virsh destroy k8s-cp-a
-```
-
-1. Wait ~10 seconds, then from **another** CP:
+- power off / shutdown CP1 VM
+- from your workstation or another control plane, try:
 
 ```bash
 kubectl get nodes
 ```
 
-If it works, the VIP migrated and your API endpoint is HA.
+If it still works via `API_VIP`, your API endpoint is HA.
 
-1. Bring CP1 back:
+If it times out after destroying `k8s-cp-a`, it means the VIP did not move. Common causes:
 
-```bash
-virsh start k8s-cp-a
-```
+- kube-vip is only running on `k8s-cp-a` (it must run on **all** control planes)
+- kube-vip is running but cannot talk to the API (missing `/etc/kubernetes/admin.conf`)
+- wrong interface set in `vip_interface` (your lab often uses `enp1s0`, not `ens3`)
 
-After ~60 seconds it should rejoin the cluster (verify with `kubectl get nodes`).
-
----
-
-## Troubleshooting
-
-### `kubectl` on CP2/CP3 says `localhost:8080 was refused`
-
-The node is missing a kubeconfig. Quick fix:
+Debug on `k8s-cp-b` and `k8s-cp-c`:
 
 ```bash
-sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes
-```
-
-Or properly set it up:
-
-```bash
-mkdir -p "$HOME/.kube"
-sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
-sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
-```
-
-### VIP didn't move after CP1 went down
-
-Check on a surviving CP:
-
-```bash
-# Is kube-vip running?
-kubectl -n kube-system get pods -o wide | grep kube-vip
-
-# Does the kube-vip kubeconfig point to localhost (NOT the VIP)?
-sudo grep server /etc/kubernetes/kube-vip.conf
-# Expected: server: https://127.0.0.1:6443
-
-# kube-vip logs
-kubectl -n kube-system logs kube-vip-$(hostname)
-
-# Is the VIP on this node's interface?
-ip addr show | grep -F 192.168.122.50
-```
-
-Common causes:
-
-| Symptom                                  | Cause                                                                     | Fix                                                          |
-| ---------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| kube-vip `Completed` (exits immediately) | Wrong env var names in manifest (e.g. `vip_address` instead of `address`) | Regenerate the manifest with correct env vars (step 2e)      |
-| kube-vip `Completed` on CP1              | `admin.conf` lacks permissions (K8s 1.29+)                                | Use `super-admin.conf` as base for `kube-vip.conf` (step 2d) |
-| kube-vip only on CP1                     | Manifest missing on CP2/CP3                                               | Deploy the static pod on every CP (step 3b)                  |
-| kube-vip `CrashLoopBackOff`              | `/etc/kubernetes/kube-vip.conf` missing or wrong                          | Recreate it (step 2d)                                        |
-| VIP never moves                          | `kube-vip.conf` points to VIP instead of `127.0.0.1`                      | Fix the server URL in `kube-vip.conf`                        |
-| Wrong interface                          | `vip_interface` doesn't match actual NIC                                  | Check with `ip link show`, update the manifest               |
-
-### After restarting a CP, it can't reach the cluster
-
-If a CP was hard-killed (e.g. `virsh destroy`), etcd and kubelet will recover
-automatically on reboot. Just wait ~60 seconds. If it still fails:
-
-```bash
-sudo systemctl restart kubelet
-kubectl get nodes
+ip addr show enp1s0 | grep -F 192.168.122.50 || true
+sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-system get pod -o wide | grep kube-vip || true
+sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl -n kube-system logs kube-vip-$(hostname) --previous || true
 ```
 
 ---
 
-## Recovery notes
+### Option B2: HAProxy load balancer VM (simple and explicit)
 
-**Reset a node** (before rejoining):
+If you prefer a classic “TCP load balancer in front of CPs”, create one extra VM (outside of Kubernetes) and run HAProxy on it.
+
+High level steps:
+
+- Create `k8s-lb-a` VM
+- Give it a fixed IP (or record its DHCP lease)
+- Configure HAProxy to listen on `:6443` and forward to `CP1_IP:6443`, `CP2_IP:6443`, `CP3_IP:6443`
+- Run `kubeadm init --control-plane-endpoint "<LB_IP>:6443" --upload-certs ...`
+- Join additional control planes and workers using `<LB_IP>:6443`
+
+This option is easy to reason about, but it introduces another moving piece (the LB VM).
+
+---
+
+## Recovery notes (practical for this repo)
+
+- **Reset a node** (inside a VM) before rejoining:
+  - Preferred: run this repo’s reset utility inside the VM: `k8s/utils/reset-k8s-node.sh`
+  - Or run the manual equivalent:
 
 ```bash
 sudo kubeadm reset -f
@@ -500,23 +507,24 @@ sudo rm -rf ~/.kube /etc/cni/net.d /var/lib/cni /var/lib/kubelet /etc/kubernetes
 sudo systemctl restart containerd
 ```
 
-**Re-issue a join token** (from any working CP):
+- **Re-join workers in bulk from the KVM host**:
+  - Use `cluster/join-workers.sh`. For HA via VIP, point it at the VIP:
+
+```bash
+cd Self-Hosted-Kubernetes-/cluster
+./join-workers.sh --control-plane-ip 192.168.122.50
+```
+
+- **Re-issue a join token** (on any control plane with kubeconfig):
 
 ```bash
 sudo kubeadm token create --print-join-command
 ```
 
-**Re-upload certs** (for adding control planes later):
+- **Re-upload certs for adding control planes later**:
 
 ```bash
 sudo kubeadm init phase upload-certs --upload-certs
-```
-
-**Re-join workers in bulk** (from the KVM host):
-
-```bash
-cd Self-Hosted-Kubernetes-/cluster
-./join-workers.sh --control-plane-ip 192.168.122.50
 ```
 
 ---
@@ -536,3 +544,22 @@ High-level steps:
    `CP1_IP:6443`, `CP2_IP:6443`, `CP3_IP:6443` (mode tcp, balance roundrobin)
 4. Use that LB IP as the `--control-plane-endpoint` in `kubeadm init`
 5. Join additional CPs and workers against the LB IP
+
+---
+
+## Alternative: HAProxy load balancer
+
+If you prefer a classic TCP load balancer instead of a floating VIP, you can
+create one extra VM running HAProxy that forwards `:6443` to all three CPs.
+The trade-off is an extra VM to manage, but it's easy to reason about and
+doesn't require kube-vip at all.
+
+High-level steps:
+
+1. Create a `k8s-lb-a` VM and give it a stable IP (e.g. `192.168.122.60`)
+2. Install HAProxy: `sudo apt-get install -y haproxy`
+3. Configure `/etc/haproxy/haproxy.cfg` to listen on `:6443` and forward to
+   `CP1_IP:6443`, `CP2_IP:6443`, `CP3_IP:6443` (mode tcp, balance roundrobin)
+4. Use that LB IP as the `--control-plane-endpoint` in `kubeadm init`
+5. Join additional CPs and workers against the LB IP
+
