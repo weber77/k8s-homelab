@@ -317,15 +317,6 @@ You’ll use:
 
 On CP2 and CP3:
 
-- configure kubectl:
-
-```bash
-mkdir -p "$HOME/.kube"
-sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
-sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
-kubectl get nodes
-```
-
 - join control-plane
 
 ```bash
@@ -333,6 +324,14 @@ sudo kubeadm join 192.168.122.50:6443 --token <token> \
   --discovery-token-ca-cert-hash sha256:<hash> \
   --control-plane \
   --certificate-key <cert-key>
+```
+
+- configure kubectl:
+
+```bash
+mkdir -p "$HOME/.kube"
+sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
+sudo chown "$(id -u)":"$(id -g)" "$HOME/.kube/config"
 ```
 
 #### Step 4.1: Install kube-vip on _every_ control-plane node (required for VIP failover)
@@ -444,12 +443,7 @@ Quick fixes:
 - Use the admin kubeconfig directly:
 
 ```bash
-for vm in k8s-cp-a k8s-cp-b k8s-cp-c; do
-  ip=$(virsh domifaddr "$vm" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1)
-  echo -n "$vm ($ip): "
-  sshpass -p ubuntu ssh -o StrictHostKeyChecking=no ubuntu@"$ip" \
-    "ip addr show | grep -qF 192.168.122.50 && echo 'HOLDS VIP' || echo '-'" 2>/dev/null
-done
+sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes
 ```
 
 Then test failover:
@@ -526,40 +520,3 @@ sudo kubeadm token create --print-join-command
 ```bash
 sudo kubeadm init phase upload-certs --upload-certs
 ```
-
----
-
-## Alternative: HAProxy load balancer
-
-If you prefer a classic TCP load balancer instead of a floating VIP, you can
-create one extra VM running HAProxy that forwards `:6443` to all three CPs.
-The trade-off is an extra VM to manage, but it's easy to reason about and
-doesn't require kube-vip at all.
-
-High-level steps:
-
-1. Create a `k8s-lb-a` VM and give it a stable IP (e.g. `192.168.122.60`)
-2. Install HAProxy: `sudo apt-get install -y haproxy`
-3. Configure `/etc/haproxy/haproxy.cfg` to listen on `:6443` and forward to
-   `CP1_IP:6443`, `CP2_IP:6443`, `CP3_IP:6443` (mode tcp, balance roundrobin)
-4. Use that LB IP as the `--control-plane-endpoint` in `kubeadm init`
-5. Join additional CPs and workers against the LB IP
-
----
-
-## Alternative: HAProxy load balancer
-
-If you prefer a classic TCP load balancer instead of a floating VIP, you can
-create one extra VM running HAProxy that forwards `:6443` to all three CPs.
-The trade-off is an extra VM to manage, but it's easy to reason about and
-doesn't require kube-vip at all.
-
-High-level steps:
-
-1. Create a `k8s-lb-a` VM and give it a stable IP (e.g. `192.168.122.60`)
-2. Install HAProxy: `sudo apt-get install -y haproxy`
-3. Configure `/etc/haproxy/haproxy.cfg` to listen on `:6443` and forward to
-   `CP1_IP:6443`, `CP2_IP:6443`, `CP3_IP:6443` (mode tcp, balance roundrobin)
-4. Use that LB IP as the `--control-plane-endpoint` in `kubeadm init`
-5. Join additional CPs and workers against the LB IP
-
