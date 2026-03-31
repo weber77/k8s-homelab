@@ -132,8 +132,8 @@ Progress checklist:
 
 - [x] Script-first automation baseline exists (`install-kvm.sh`, VM creation scripts, reset utilities).
 - [x] Create cluster script.
-- [ ] Consolidate VM and Kubernetes setup flags into one documented config file (defaults + overrides).
-- [ ] Add stronger preflight checks (CPU virtualization, disk space, libvirt status, network bridge availability).
+- [x] Consolidate VM and Kubernetes setup flags into one documented config file (defaults + overrides).
+- [x] Add stronger preflight checks (CPU virtualization, disk space, libvirt status, network bridge availability).
 - [ ] Improve error messages and recovery steps so failures are actionable.
 - [ ] Add non-interactive mode support for repeatable local automation and CI-style validation.
 
